@@ -1,0 +1,21 @@
+# Environment secrets
+.env
+
+# Virtual environment
+botenv/
+venv/
+
+# Python cache & build files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+#local data
+files.json
+aliases.json
