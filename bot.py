@@ -4,6 +4,7 @@ import re
 import logging
 import aiohttp
 import sys
+import random
 from datetime import timedelta, datetime, timezone
 from dotenv import load_dotenv
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
@@ -42,6 +43,12 @@ ALIAS_FILE = "aliases.json"
 LAST_ACTIVITY = datetime.now(timezone.utc)
 SENT_MESSAGES = []  # Track all messages for cleanup
 
+# dummy messages and render warmup activity
+STARTUP_TIME = datetime.now(timezone.utc)
+RENDER_WARMED = False  # 🔥 Flag to avoid dummy progress once warmed
+
+
+
 
 # =====================
 # Helpers
@@ -77,9 +84,45 @@ def update_activity():
 
 
 # =====================
+# Smart Dummy Progress
+# =====================
+
+async def smart_dummy_progress(update: Update, stop_event: asyncio.Event):
+    """Show dynamic progress messages until real task finishes."""
+    progress_msgs = [
+        "👋 Hey there! Warming up the system...",
+        "⚙ Getting everything ready for you...",
+        "📂 Preparing your secure file vault...",
+        "🔍 Checking access token validity...",
+        "🚀 Almost done, just a few seconds more..."
+    ]
+    sent_msgs = []
+
+    for msg_text in progress_msgs:
+        if stop_event.is_set():
+            break
+        msg = await update.message.reply_text(msg_text)
+        sent_msgs.append(msg)
+        await asyncio.sleep(random.uniform(1.5, 3.5))  # ⏱ random delay
+
+    if not stop_event.is_set():
+        final_msg = await update.message.reply_text("✨ System ready — finishing up...")
+        sent_msgs.append(final_msg)
+        await asyncio.sleep(1.8)
+
+    # Cleanup all dummy messages
+    for msg in sent_msgs:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+# =====================
 # Core Commands
 # =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global RENDER_WARMED
+
     update_activity()
     args = context.args
     user_id = update.effective_user.id
@@ -102,6 +145,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wait_msg = await update.message.reply_text("⏳ Preparing your download session...")
         SENT_MESSAGES.append((wait_msg.chat_id, wait_msg.message_id))
         
+        # 💤 Adaptive Render cold start handler
+        time_since_start = (datetime.now(timezone.utc) - STARTUP_TIME).total_seconds()
+        cold_start = not RENDER_WARMED and time_since_start < 90  # first 1.5 minutes after startup
+        stop_event = asyncio.Event()
+
+        # Launch dummy progress in background if cold start
+        if cold_start:
+            asyncio.create_task(smart_dummy_progress(update, stop_event))
+
         verify_url = f"https://mkcycles.pythonanywhere.com/tokens/verify?token={key}&user_id={user_id}"
 
         async with aiohttp.ClientSession() as session:
@@ -110,12 +162,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     result = await resp.json()
             except Exception as e:
                 logging.error(f"Token verification failed: {e}")
+                stop_event.set()  # stop dummy messages if error occurs
                 return await wait_msg.edit_text("⚠ Token verification failed. Try again later.")
+
+        stop_event.set()  # ✅ stop dummy messages once response is ready
 
         await wait_msg.delete()
 
         if not result.get("valid"):
-            msg = await update.message.reply_text(                "❌ Invalid or expired token.\n"
+            msg = await update.message.reply_text("❌ Invalid or expired token.\n"
                 "Please use a valid link from our <b>Official Anime Share Point</b> channel.",
                 parse_mode="HTML")
             SENT_MESSAGES.append((msg.chat_id, msg.message_id))
@@ -487,7 +542,7 @@ async def save_new_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================
 def main():
     app = Application.builder().token(TOKEN).build()
-    
+   
 
     # Commands
     app.add_handler(CommandHandler("start", start))
@@ -511,8 +566,6 @@ def main():
         asyncio.create_task(check_inactivity(app))
 
     app.post_init = start_background_tasks
-
-
 
     async def set_menu(app: Application):
         """Set command menu."""
@@ -538,7 +591,6 @@ def main():
     app.post_init = set_menu
     print("✅ Bot is running...")
     app.run_polling(close_loop=False)
-
 
 if __name__ == "__main__":
     main()
