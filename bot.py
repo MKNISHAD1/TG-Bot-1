@@ -17,6 +17,8 @@ from telegram.ext import (
     filters,
 )
 import asyncio
+from gist_sync import load_all_files, save_json_dict
+
 
 # =====================
 # Load Environment & Logging
@@ -34,6 +36,9 @@ TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 VAULT_CHANNEL_ID = int(os.getenv("VAULT_CHANNEL_ID"))
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")  # without @
+
+GIST_ENABLED = bool(os.getenv("GIST_ID") and os.getenv("GITHUB_TOKEN"))
+
 DATA_FILE = "files.json"
 ALIAS_FILE = "aliases.json"
 
@@ -54,14 +59,34 @@ RENDER_WARMED = False  # 🔥 Flag to avoid dummy progress once warmed
 # Helpers
 # =====================
 def load_json(path):
-    if not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    # prefer local file if present (so dev/test still easy)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    # fallback to gist if enabled
+    if GIST_ENABLED:
+        all_files = load_all_files()
+        filename = os.path.basename(path)
+        content = all_files.get(filename)
+        if content:
+            try:
+                return json.loads(content)
+            except Exception:
+                return {}
+    return {}
+
 
 def save_json(path, data):
+    # save local copy for convenience
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+    # update gist if enabled
+    if GIST_ENABLED:
+        filename = os.path.basename(path)
+        ok = save_json_dict(filename, data)
+        if not ok:
+            logging.warning(f"Failed to save {filename} to gist.")
+
 
 def remove_emojis(text):
     """Remove emojis and unwanted Unicode symbols."""
@@ -370,7 +395,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 <b>About Anime File Downloader</b>\n\n"
         "This bot helps you securely fetch anime files using special access links.\n\n"
         "🎥 Files are hosted in our private vault.\n"
-        f"📢 Join our public channel: <a href='https://t.me/{CHANNEL_USERNAME}'>@{CHANNEL_USERNAME}</a>\n"
+        f"📢 Join our public channel:<a href='https://t.me/{CHANNEL_USERNAME}'><b>Anime Share Point</b></a>\n"
         "🕒 Files auto-delete after 20 minutes for safety.\n\n"
         "Created with ❤ by MK",
         parse_mode="HTML"
