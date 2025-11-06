@@ -17,6 +17,7 @@ from telegram.ext import (
     filters,
 )
 import asyncio
+from aiohttp import web
 from gist_sync import load_all_files, save_json_dict
 
 
@@ -35,7 +36,9 @@ logging.basicConfig(
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 VAULT_CHANNEL_ID = int(os.getenv("VAULT_CHANNEL_ID"))
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")  # without @
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")  
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Example: https://your-render-app.onrender.com
+
 
 GIST_ENABLED = bool(os.getenv("GIST_ID") and os.getenv("GITHUB_TOKEN"))
 
@@ -565,11 +568,11 @@ async def save_new_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================
 # Main
 # =====================
-def main():
+async def main():
     app = Application.builder().token(TOKEN).build()
-   
+  
 
-    # Commands
+    #Register all Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("about", about))
     app.add_handler(CommandHandler("add", add_file))
@@ -614,8 +617,31 @@ def main():
         await app.bot.set_my_commands(admin_cmds, scope={"type":"chat", "chat_id":ADMIN_ID})
 
     app.post_init = set_menu
-    print("✅ Bot is running...")
-    app.run_polling(close_loop=False)
+    
+    # Create aiohttp web app
+    web_app = web.Application()
+
+    async def handle_webhook(request):
+        data = await request.json()
+        await app.update_queue.put(Update.de_json(data, app.bot))
+        return web.Response(text="OK")
+
+    web_app.add_routes([web.post(f"/webhook/{TOKEN}", handle_webhook)])
+
+    # Set webhook URL for Telegram
+    async with app:
+        await app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
+        print("✅ Webhook set successfully")
+
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        port = int(os.getenv("PORT", 10000))
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+
+        print(f"🚀 Bot running via webhook on port {port}")
+        await asyncio.Event().wait()  # keep running
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
