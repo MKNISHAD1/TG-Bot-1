@@ -630,7 +630,7 @@ async def main():
 
     # Set webhook URL for Telegram
     async with app:
-        await app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
+        await app.bot.set_webhook(f"{WEBHOOK_URL.rstrip('/')}/webhook/{TOKEN}")
         print("✅ Webhook set successfully")
 
         runner = web.AppRunner(web_app)
