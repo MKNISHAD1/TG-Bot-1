@@ -592,9 +592,9 @@ async def main():
     # Background task for inactivity check (after app starts)
     async def start_background_tasks(app: Application):
         asyncio.create_task(check_inactivity(app))
-
     app.post_init = start_background_tasks
 
+    # Setup command menu
     async def set_menu(app: Application):
         """Set command menu."""
         #For Normal User
@@ -618,21 +618,47 @@ async def main():
 
     app.post_init = set_menu
     
-    # Create aiohttp web app
+    # -------------------
+    # aiohttp web server
+    # -------------------
+
     web_app = web.Application()
 
+    # ✅ Webhook route for Telegram
     async def handle_webhook(request):
         data = await request.json()
+        print("📩 Update received:", data)  # Debugging
         await app.update_queue.put(Update.de_json(data, app.bot))
         return web.Response(text="OK")
+    
+    # ✅ Root route for browser (health check)
+    async def handle_root(request):
+        return web.Response(text="Bot is alive 🟢", content_type="text/plain")
 
-    web_app.add_routes([web.post(f"/webhook/{TOKEN}", handle_webhook)])
 
-    # Set webhook URL for Telegram
+
+    # Register routes
+    web_app.add_routes([
+        web.post(f"/webhook/{TOKEN}", handle_webhook),
+        web.get("/", handle_root)
+    ])
+
+
+    # -------------------
+    # Start Webhook Server
+    # -------------------
+
     async with app:
-        await app.bot.set_webhook(f"{WEBHOOK_URL.rstrip('/')}/webhook/{TOKEN}")
-        print("✅ Webhook set successfully")
+        # Set Telegram webhook
+        webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{TOKEN}"
+        await app.bot.set_webhook(webhook_url)
+        print(f"✅ Webhook set successfully at: {webhook_url}")
 
+        # Start processing updates in background
+        asyncio.create_task(app.start())
+        print("🌀 Bot event loop started")
+
+        # Start aiohttp web server
         runner = web.AppRunner(web_app)
         await runner.setup()
         port = int(os.getenv("PORT", 10000))
@@ -641,6 +667,7 @@ async def main():
 
         print(f"🚀 Bot running via webhook on port {port}")
         await asyncio.Event().wait()  # keep running
+
 
 
 if __name__ == "__main__":
