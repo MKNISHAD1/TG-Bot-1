@@ -635,7 +635,7 @@ async def main():
     app.add_handler(CommandHandler("addalias", add_alias))
     app.add_handler(CommandHandler("listaliases", list_aliases))
     app.add_handler(CommandHandler("removealias", remove_alias))
-    application.add_handler(CommandHandler("debugjson", debug_json))
+    app.add_handler(CommandHandler("debugjson", debug_json))
 
     # Auto-save
     app.add_handler(MessageHandler(filters.ALL, save_new_file))
