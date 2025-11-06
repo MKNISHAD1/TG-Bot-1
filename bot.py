@@ -411,14 +411,16 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Admin Commands
 # =====================
 async def admin_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return False
-    return True
+    """Check if user is admin."""
+    return update.effective_user.id == ADMIN_ID
+
 
 
 async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    """Manually add a file entry."""
+    if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
+
 
     if len(context.args) < 2:
         return await update.message.reply_text("Usage: /add <file name> <file_id>")
@@ -433,8 +435,10 @@ async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    """List all saved files."""
+    if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
+
 
     data = load_json(DATA_FILE)
     if not data:
@@ -449,8 +453,10 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def remove_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    """Remove a file entry."""
+    if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
+
 
     if not context.args:
         return await update.message.reply_text("Usage: /remove <file name>")
@@ -467,7 +473,8 @@ async def remove_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    """Clear all saved files."""
+    if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
     save_json(DATA_FILE, {})
     await update.message.reply_text("⚠ All files cleared!")
@@ -478,7 +485,7 @@ async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================
 async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add alias with syntax: /addalias [Alias Name] <file1, file2, file3>"""
-    if update.effective_user.id != ADMIN_ID:
+    if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
 
     text = update.message.text.strip()
@@ -506,8 +513,10 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    """List all alias mappings."""
+    if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
+
 
     aliases = load_json(ALIAS_FILE)
     if not aliases:
@@ -515,12 +524,24 @@ async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "<b>🔗 Saved Aliases:</b>\n\n"
     for i, (alias, items) in enumerate(aliases.items(), start=1):
-        text += f"{i}. <b>{alias}</b> → {', '.join(items)}\n"
+        # ✅ Ensure items is iterable (list)
+        if isinstance(items, str):
+            items = [items]
+        elif not isinstance(items, list):
+            items = list(items)
+
+        safe_alias = alias.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        safe_items = [str(it).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") for it in items]
+
+        text += f"{i}. <b>{safe_alias}</b> → {', '.join(safe_items)}\n"
+
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+
 async def remove_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    """Remove alias by name."""
+    if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
     if not context.args:
         return await update.message.reply_text("Usage: /removealias <alias name>")
@@ -535,7 +556,39 @@ async def remove_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Alias not found.")
 
+async def debug_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current contents of JSON data files (for admin only)."""
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("⛔ Unauthorized.")
 
+    data = load_json(DATA_FILE)
+    aliases = load_json(ALIAS_FILE)
+
+    text = "<b>🧠 Debug Info:</b>\n\n"
+    text += "<b>Files:</b>\n"
+    if data:
+        for i, (k, v) in enumerate(data.items(), start=1):
+            text += f"{i}. {k} → <code>{v}</code>\n"
+    else:
+        text += "❌ No files found.\n"
+
+    text += "\n<b>Aliases:</b>\n"
+    if aliases:
+        for i, (alias, items) in enumerate(aliases.items(), start=1):
+            try:
+                if isinstance(items, list):
+                    joined = ", ".join(items)
+                elif isinstance(items, str):
+                    joined = items
+                else:
+                    joined = str(items)
+                text += f"{i}. <b>{alias}</b> → {joined}\n"
+            except Exception as e:
+                text += f"{i}. <b>{alias}</b> → ⚠ Error: {e}\n"
+    else:
+        text += "❌ No aliases found.\n"
+
+    await update.message.reply_text(text, parse_mode="HTML")
 # =====================
 # Auto Save
 # =====================
@@ -582,6 +635,7 @@ async def main():
     app.add_handler(CommandHandler("addalias", add_alias))
     app.add_handler(CommandHandler("listaliases", list_aliases))
     app.add_handler(CommandHandler("removealias", remove_alias))
+    application.add_handler(CommandHandler("debugjson", debug_json))
 
     # Auto-save
     app.add_handler(MessageHandler(filters.ALL, save_new_file))
@@ -611,6 +665,7 @@ async def main():
             BotCommand("addalias", "Add alias for grouped files"),
             BotCommand("listaliases", "List aliases"),
             BotCommand("removealias", "Remove alias"),
+            BotCommand("debugjson", "List all data and alias"),
         ]
 
         await app.bot.set_my_commands(user_cmds)
