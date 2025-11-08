@@ -751,8 +751,8 @@ async def main():
 
         # Initialize and start Telegram bot
         await app.initialize()
-        await app.start()
-        print("🌀 Telegram bot started (webhook mode)")
+        asyncio.create_task(app.start())
+        print("🌀 Telegram bot event loop started ")
 
         # Start aiohttp web server
         runner = web.AppRunner(web_app)
