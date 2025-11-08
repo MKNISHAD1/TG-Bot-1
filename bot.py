@@ -644,9 +644,10 @@ async def save_new_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================
 async def main():
     app = Application.builder().token(TOKEN).build()
-  
 
-    #Register all Commands
+    # -------------------
+    # Register all Commands
+    # -------------------
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("about", about))
     app.add_handler(CommandHandler("add", add_file))
@@ -658,50 +659,47 @@ async def main():
     app.add_handler(CommandHandler("removealias", remove_alias))
     app.add_handler(CommandHandler("debugjson", debug_json))
 
-    # Auto-save
+    # Auto-save all incoming messages
     app.add_handler(MessageHandler(filters.ALL, save_new_file))
-    
-    # handle refresh for join channel 
+
+    # Handle refresh for join channel
     app.add_handler(CallbackQueryHandler(handle_refresh, pattern="^refresh:"))
-    
-    
-    # Combined post_init block
-    
-        # [1] post_init block  
-        # Background task for inactivity check (after app starts)
-        async def on_startup(app: Application):
-            asyncio.create_task(check_inactivity(app))
 
-        # [2] post_init block 
-        # Setup command menu For Normal User
-            user_cmds = [
-                BotCommand("start", "Fetch your file"),
-                BotCommand("about", "About this bot")
-            ]
-            # For Admin Use Only
-            admin_cmds = user_cmds + [
-                BotCommand("add", "Add file manually"),
-                BotCommand("list", "List files"),
-                BotCommand("remove", "Remove a file"),
-                BotCommand("clearall", "Clear all files"),
-                BotCommand("addalias", "Add alias for grouped files"),
-                BotCommand("listaliases", "List aliases"),
-                BotCommand("removealias", "Remove alias"),
-                BotCommand("debugjson", "List all data and alias"),
-            ]
+    # -------------------
+    # post_init block (runs after bot starts)
+    # -------------------
+    async def on_startup(app: Application):
+        # [1] Background task for inactivity check
+        asyncio.create_task(check_inactivity(app))
 
-            await app.bot.set_my_commands(user_cmds)
-            await app.bot.set_my_commands(admin_cmds, scope={"type":"chat", "chat_id":ADMIN_ID})
-            
-            print("✅ Startup setup complete (menu + background tasks started)")
+        # [2] Setup command menu
+        #Normal User Commmands 
+        user_cmds = [
+            BotCommand("start", "Fetch your file"),
+            BotCommand("about", "About this bot")
+        ]
+        #Admin Commmands 
+        admin_cmds = user_cmds + [
+            BotCommand("add", "Add file manually"),
+            BotCommand("list", "List files"),
+            BotCommand("remove", "Remove a file"),
+            BotCommand("clearall", "Clear all files"),
+            BotCommand("addalias", "Add alias for grouped files"),
+            BotCommand("listaliases", "List aliases"),
+            BotCommand("removealias", "Remove alias"),
+            BotCommand("debugjson", "List all data and alias"),
+        ]
 
-        app.post_init = on_startup
+        await app.bot.set_my_commands(user_cmds)
+        await app.bot.set_my_commands(admin_cmds, scope={"type": "chat", "chat_id": ADMIN_ID})
 
-    
+        print("✅ Startup setup complete (menu + background tasks started)")
+
+    app.post_init = on_startup
+
     # -------------------
     # aiohttp web server
     # -------------------
-
     web_app = web.Application()
 
     # ✅ Webhook route for Telegram
@@ -710,11 +708,10 @@ async def main():
         print("📩 Update received:", data)  # Debugging
         await app.update_queue.put(Update.de_json(data, app.bot))
         return web.Response(text="OK")
-    
+
     # ✅ Root route for browser (health check)
     async def handle_root(request):
         return web.Response(text="Bot is alive 🟢", content_type="text/plain")
-
 
     # Register routes
     web_app.add_routes([
@@ -722,11 +719,9 @@ async def main():
         web.get("/", handle_root)
     ])
 
-
     # -------------------
     # Start Webhook Server
     # -------------------
-
     async with app:
         # Set Telegram webhook
         webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{TOKEN}"
@@ -747,7 +742,6 @@ async def main():
 
         print(f"🚀 Bot running via webhook on port {port}")
         await asyncio.Event().wait()  # keep running
-
 
 
 if __name__ == "__main__":
