@@ -34,6 +34,7 @@ logging.basicConfig(
 # =====================
 # Config
 # =====================
+
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 VAULT_CHANNEL_ID = int(os.getenv("VAULT_CHANNEL_ID"))
@@ -115,6 +116,19 @@ def update_activity():
     global LAST_ACTIVITY
     LAST_ACTIVITY = datetime.now(timezone.utc)
 
+async def schedule_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_id: int, delay: int = 600):
+    """Schedules deletion of a message after given seconds (default 10 minutes)."""
+    try:
+        await asyncio.sleep(delay)
+        await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        try:
+            SENT_MESSAGES.remove((chat_id, msg_id))
+        except ValueError:
+            pass
+    except Exception:
+        pass
+
+
 
 # =====================
 # Smart Dummy Progress
@@ -146,23 +160,35 @@ async def smart_progress(update, stop_event: asyncio.Event, mode: str = "token")
         ]
 
     sent = []
-    for text in msgs:
-        if stop_event.is_set():
-            break
-        m = await update.message.reply_text(text)
-        sent.append(m)
-        await asyncio.sleep(random.uniform(1.5, 3.2))
+    try:
+        for text in msgs:
+            if stop_event.is_set():
+                break
+            # reply_text may fail if update.message is missing; guard it
+            try:
+                m = await update.message.reply_text(text)
+                sent.append(m)
+            except Exception:
+                logging.exception("Failed to send warmup message (maybe update.message is None)")
+                break
+            await asyncio.sleep(random.uniform(1.5, 3.2))
 
-    if not stop_event.is_set():
-        final = await update.message.reply_text("✨ System ready — finishing up...")
-        sent.append(final)
-        await asyncio.sleep(1.5)
+        # If not signalled to stop, show a final "ready" line
+        if not stop_event.is_set():
+            try:
+                final = await update.message.reply_text("✨ System ready — finishing up...")
+                sent.append(final)
+                await asyncio.sleep(1.5)
+            except Exception:
+                logging.exception("Failed to send warmup final message")
 
-    for m in sent:
-        try:
-            await m.delete()
-        except Exception:
-            pass
+    finally:
+        # Attempt to clean up the progress messages (best-effort)
+        for m in sent:
+            try:
+                await m.delete()
+            except Exception:
+                pass
 
 
 
@@ -180,15 +206,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     time_since_start = (datetime.now(timezone.utc) - STARTUP_TIME).total_seconds()
     cold_start = not RENDER_WARMED and time_since_start < 90
 
-    # CASE 2: plain /start (no token)
+    # CASE 1: plain /start (no token)
     if not args:
+        # launch warmup animation if cold
+        warm_task = None
         if cold_start:
-            asyncio.create_task(smart_progress(update, stop_event, mode="start"))
+            warm_task = asyncio.create_task(smart_progress(update, stop_event, mode="start"))
 
-        await asyncio.sleep(0.3)
-        stop_event.set()
-        RENDER_WARMED = True  # mark warmed up
-
+        # send the real welcome message
         msg = await update.message.reply_text(
             "🎌 Welcome to Anime File Downloader!\n\n"
             "Kindly use secure links from our official channel to access your files.\n"
@@ -196,30 +221,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
         SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+        context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+
+        # mark warmed and stop the warmup animation
+        RENDER_WARMED = True
+        stop_event.set()
         return
 
-    # CASE 1: token provided
+
+    # CASE 2: token provided
     key = " ".join(args).strip()
     if len(key) >= 10 and " " not in key:
         wait_msg = await update.message.reply_text("⏳ Preparing your download session...")
         SENT_MESSAGES.append((wait_msg.chat_id, wait_msg.message_id))
 
+        warm_task = None
         if cold_start:
-            asyncio.create_task(smart_progress(update, stop_event, mode="token"))
+            warm_task = asyncio.create_task(smart_progress(update, stop_event, mode="token"))
 
         verify_url = f"https://mkcycles.pythonanywhere.com/tokens/verify?token={key}&user_id={user_id}"
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(verify_url, timeout=8) as resp:
                     result = await resp.json()
-            except Exception as e:
-                logging.error(f"Token verification failed: {e}")
+            except Exception:
+                logging.exception("Token verification failed")
                 stop_event.set()
                 return await wait_msg.edit_text("⚠ Token verification failed. Try again later.")
 
+        # Stop warmup and remove waiting message
         stop_event.set()
-        await wait_msg.delete()
-        RENDER_WARMED = True  # ✅ mark system warmed
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+
+        RENDER_WARMED = True  # mark warmed
 
         if not result.get("valid"):
             msg = await update.message.reply_text(
@@ -228,6 +265,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
             SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+            context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+
             return
 
         alias_name = result.get("alias") or result.get("file")
@@ -236,6 +275,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⚠ Token verified but no file found. It might have been deleted or moved. 😢"
             )
             SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+            context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+
             return
 
         keyboard = InlineKeyboardMarkup([
@@ -247,15 +288,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard
         )
         SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+        context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
         return
 
-    # CASE 3: invalid command
-    if cold_start:
-        asyncio.create_task(smart_progress(update, stop_event, mode="random"))
 
-    await asyncio.sleep(0.3)
-    stop_event.set()
-    RENDER_WARMED = True
+    # CASE 3: invalid command (text after /start doesn't look like a token)
+    warm_task = None
+    if cold_start:
+        warm_task = asyncio.create_task(smart_progress(update, stop_event, mode="random"))
 
     msg = await update.message.reply_text(
         "😅 Invalid command or request.\n"
@@ -263,6 +303,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
     SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+    context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+
+    RENDER_WARMED = True
+    stop_event.set()
 
 
 # =====================
@@ -270,14 +314,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================
 async def process_alias_or_file(update: Update, context: ContextTypes.DEFAULT_TYPE, alias_name: str):
     update_activity()
-    data = load_json(DATA_FILE)
-    aliases = load_json(ALIAS_FILE)
+    data = load_json(DATA_FILE) or {}
+    aliases = load_json(ALIAS_FILE) or {}
     sent_count = 0
 
-    # ✅ If alias found
+    # If alias found
     if alias_name in aliases:
         msg = await update.message.reply_text("📦 Preparing your files... please wait.")
         SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+        context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+        
         await asyncio.sleep(1.5)
 
         for fname in aliases[alias_name]:
@@ -290,6 +336,8 @@ async def process_alias_or_file(update: Update, context: ContextTypes.DEFAULT_TY
         if sent_count == 0:
             msg = await update.message.reply_text("❌ No matching files found for this request.")
             SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+            context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+            
         else:
             msg = await update.message.reply_text(
                 f"✅ Sent {sent_count} files for: <b>{alias_name}</b>\n\n"
@@ -297,32 +345,44 @@ async def process_alias_or_file(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode="HTML"
             )
             SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+            context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+
         return
 
-    # ✅ If single file found
+    # If single file found
     if alias_name in data:
         file_id = data[alias_name]
         msg = await update.message.reply_text("📦 Fetching your file... please wait.")
         SENT_MESSAGES.append((msg.chat_id, msg.message_id))
-        video_msg = await context.bot.send_video(chat_id=update.effective_chat.id, video=file_id)
-        SENT_MESSAGES.append((video_msg.chat_id, video_msg.message_id))
-        await msg.delete()
+        context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+        
+        try:
+            video_msg = await context.bot.send_video(chat_id=update.effective_chat.id, video=file_id)
+            SENT_MESSAGES.append((video_msg.chat_id, video_msg.message_id))
+        except Exception:
+            logging.exception("Failed to send video")
+            await update.message.reply_text("❌ Failed to send file.")
+            return
 
-        # Auto delete file after 10 min (optional track)
-        SENT_MESSAGES.append((video_msg.chat_id, video_msg.message_id))
-        # schedule job (do NOT await run_once — it returns a Job object)
+        # schedule delete after 10 minutes
         context.application.job_queue.run_once(
             delete_message,
             when=timedelta(minutes=10),
             data={"chat_id": video_msg.chat_id, "msg_id": video_msg.message_id}
         )
 
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
         msg2 = await update.message.reply_text("✅ File sent successfully.")
         SENT_MESSAGES.append((msg2.chat_id, msg2.message_id))
+        context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
     else:
         msg = await update.message.reply_text("❌ No matching files found for this request.")
         SENT_MESSAGES.append((msg.chat_id, msg.message_id))
-
+        context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
 
 # =====================
 # Channel Verification (Public Channel)
@@ -334,90 +394,71 @@ async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     try:
-        # ✅ Check if user is a member of your PUBLIC channel
         member = await context.bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
         status = member.status.lower()
-    except Exception as e:
-        logging.error(f"Error verifying membership for {user_id}: {e}")
-        msg = await query.edit_message_text("⚠ Couldn’t verify your channel join. Please try again later.")
-        SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+    except Exception:
+        logging.exception("Error verifying membership")
+        try:
+            msg = await query.edit_message_text("⚠ Couldn’t verify your channel join. Please try again later.")
+            SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+            context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))  
+        except Exception:
+            pass
         return
 
-
-    # ✅ If user is already a member or admin
     if status in ["member", "administrator", "creator"]:
-        msg = await query.edit_message_text("✅ Channel verified! Fetching your files...")
-        SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+        try:
+            msg = await query.edit_message_text("✅ Channel verified! Fetching your files...")
+            SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+            context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+        except Exception:
+            pass
 
-
-        # ✅ Proper fake message class
+        # Fake message object to reuse process_alias_or_file
         class FakeMessage:
-            def __init__(self, chat_id):
+            def _init_(self, chat_id):
                 self.chat_id = chat_id
                 self.chat = type("Chat", (), {"id": chat_id})()
 
             async def reply_text(self, text, **kwargs):
-               m = await context.bot.send_message(chat_id=self.chat_id, text=text, **kwargs)
-               SENT_MESSAGES.append((m.chat_id, m.message_id))
-               return m
+                m = await context.bot.send_message(chat_id=self.chat_id, text=text, **kwargs)
+                SENT_MESSAGES.append((m.chat_id, m.message_id))
+                return m
 
-
-        # ✅ Create a fake update that mimics a normal user message
         fake_msg = FakeMessage(query.message.chat_id)
         fake_update = Update(update.update_id, message=fake_msg)
-
-        # ✅ Call alias processing normally
         await process_alias_or_file(fake_update, context, alias_name)
         return
 
-    # ❌ Not joined yet
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNEL_USERNAME}")],
         [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{alias_name}")]
     ])
-    msg = await query.edit_message_text(
-        "❌ You must join our public channel first to access files.\n"
-        "After joining, click ‘Refresh’ below 👇",
-        reply_markup=keyboard
-    )
-    SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+    try:
+        msg = await query.edit_message_text(
+            "❌ You must join our public channel first to access files.\n"
+            "After joining, click ‘Refresh’ below 👇",
+            reply_markup=keyboard
+        )
+        SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+        context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+    except Exception:
+        pass
 
 # =====================
-# Auto Delete (job_queue)
+# Auto Delete (job_queue handler)
 # =====================
-
 async def delete_message(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
     try:
         await context.bot.delete_message(chat_id=data["chat_id"], message_id=data["msg_id"])
-        SENT_MESSAGES.remove((data["chat_id"], data["msg_id"]))
+        try:
+            SENT_MESSAGES.remove((data["chat_id"], data["msg_id"]))
+        except ValueError:
+            pass
     except Exception:
-        pass
-
-
-# =====================
-# Auto Clean / Restart
-# =====================
-async def check_inactivity(app: Application):
-    """Deletes all messages and restarts bot if inactive for 20 mins."""
-    global SENT_MESSAGES
-    while True:
-        await asyncio.sleep(300)  # check every 5 minutes
-        now = datetime.now(timezone.utc)
-        diff = (now - LAST_ACTIVITY).total_seconds()
-
-        if diff > 600:  # 10 minutes
-            logging.warning("⚠ No activity for 20 minutes. Cleaning up messages & restarting...")
-
-            for chat_id, msg_id in SENT_MESSAGES:
-                try:
-                    await app.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                except Exception:
-                    pass
-
-            SENT_MESSAGES.clear()
-            logging.info("♻ Restarting bot process...")
-            os.execl(sys.executable, sys.executable, *sys.argv)
+        # best-effort
+        logging.exception("Failed to delete scheduled message")
 
 
 # =====================
@@ -429,71 +470,50 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "This bot helps you securely fetch anime files using special access links.\n\n"
         "🎥 Files are hosted in our private vault.\n"
         f"📢 Join our public channel:<a href='https://t.me/{CHANNEL_USERNAME}'><b>Anime Share Point</b></a>\n"
-        "🕒 Files auto-delete after 20 minutes for safety.\n\n"
+        "🕒 Files auto-delete after 10 minutes for safety.\n\n"
         "Created with ❤ by MK",
         parse_mode="HTML"
     )
     SENT_MESSAGES.append((msg.chat_id, msg.message_id))
-
-
+    context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
 
 # =====================
 # Admin Commands
 # =====================
 async def admin_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check if user is admin."""
     return update.effective_user.id == ADMIN_ID
 
-
-
 async def add_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually add a file entry."""
     if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
-
-
     if len(context.args) < 2:
         return await update.message.reply_text("Usage: /add <file name> <file_id>")
-
     file_name = remove_emojis(" ".join(context.args[:-1]))
     file_id = context.args[-1]
-    data = load_json(DATA_FILE)
-
+    data = load_json(DATA_FILE) or {}
     data[file_name] = file_id
     save_json(DATA_FILE, data)
     await update.message.reply_text(f"✅ Added file:\n<b>{file_name}</b>", parse_mode="HTML")
 
-
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all saved files."""
     if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
-
-
-    data = load_json(DATA_FILE)
+    data = load_json(DATA_FILE) or {}
     if not data:
         return await update.message.reply_text("📂 No files saved yet.")
-
     text = "<b>📜 Saved Files:</b>\n\n"
     for i, name in enumerate(data.keys(), start=1):
         safe_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         text += f"{i}. {safe_name}\n"
-
     await update.message.reply_text(text, parse_mode="HTML")
 
-
 async def remove_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove a file entry."""
     if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
-
-
     if not context.args:
         return await update.message.reply_text("Usage: /remove <file name>")
-
     key = " ".join(context.args)
-    data = load_json(DATA_FILE)
-
+    data = load_json(DATA_FILE) or {}
     if key in data:
         del data[key]
         save_json(DATA_FILE, data)
@@ -501,84 +521,63 @@ async def remove_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ File not found.")
 
-
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Clear all saved files."""
     if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
     save_json(DATA_FILE, {})
     await update.message.reply_text("⚠ All files cleared!")
 
-
 # =====================
 # Alias System (Improved)
 # =====================
 async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add alias with syntax: /addalias [Alias Name] <file1, file2, file3>"""
     if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
-
     text = update.message.text.strip()
-
-    # Match alias pattern like: /addalias [Alias Name] <file1, file2, file3>
     match = re.match(r"^/addalias\s*\[(.+?)\]\s*<(.+)>", text)
     if not match:
         return await update.message.reply_text(
             "⚠ Invalid format.\nUse:\n<b>/addalias [Alias Name] <file1, file2, ...></b>",
             parse_mode="HTML"
         )
-
     alias_name = remove_emojis(match.group(1).strip())
     files_part = match.group(2)
     file_patterns = [remove_emojis(f.strip()) for f in files_part.split(",") if f.strip()]
-
-    aliases = load_json(ALIAS_FILE)
+    aliases = load_json(ALIAS_FILE) or {}
     aliases[alias_name] = file_patterns
     save_json(ALIAS_FILE, aliases)
-
     await update.message.reply_text(
         f"✅ Alias <b>{alias_name}</b> added with {len(file_patterns)} files.",
         parse_mode="HTML"
     )
 
-
 async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all alias mappings."""
     if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
-
-
-    aliases = load_json(ALIAS_FILE)
+    aliases = load_json(ALIAS_FILE) or {}
     if not aliases:
         return await update.message.reply_text("📂 No aliases saved.")
-
     text = "<b>🔗 Saved Aliases:</b>\n\n"
     for i, (alias, items) in enumerate(aliases.items(), start=1):
-        # ✅ Ensure items is iterable (list)
         if isinstance(items, str):
             items = [items]
         elif not isinstance(items, list):
-            items = list(items)
-
+            try:
+                items = list(items)
+            except Exception:
+                items = [str(items)]
         safe_alias = alias.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         safe_items = [str(it).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") for it in items]
-
         text += f"{i}. <b>{safe_alias}</b> → {', '.join(safe_items)}\n"
-
     await update.message.reply_text(text, parse_mode="HTML")
 
-
-
 async def remove_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove alias by name."""
     if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
     if not context.args:
         return await update.message.reply_text("Usage: /removealias <alias name>")
-
     alias_name = " ".join(context.args)
-    aliases = load_json(ALIAS_FILE)
-
+    aliases = load_json(ALIAS_FILE) or {}
     if alias_name in aliases:
         del aliases[alias_name]
         save_json(ALIAS_FILE, aliases)
@@ -587,28 +586,20 @@ async def remove_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Alias not found.")
 
 async def debug_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current contents of JSON data files (for admin only). Sends two files: files.json and aliases.json"""
     if update.effective_user.id != ADMIN_ID:
         return await update.message.reply_text("⛔ Unauthorized.")
-
-    data = load_json(DATA_FILE)
-    aliases = load_json(ALIAS_FILE)
-
-    # Prepare two small files to send back
+    data = load_json(DATA_FILE) or {}
+    aliases = load_json(ALIAS_FILE) or {}
     files = {
         "files.json": json.dumps(data, ensure_ascii=False, indent=2),
         "aliases.json": json.dumps(aliases, ensure_ascii=False, indent=2),
     }
-
     for fname, content in files.items():
         bio = io.BytesIO(content.encode("utf-8"))
         bio.name = fname
-        # send as document (so big content is handled) — keep small though
         await context.bot.send_document(chat_id=update.effective_chat.id, document=bio)
-
     await update.message.reply_text("✅ Sent debug JSON files.")
-    
-    
+ 
 
 # =====================
 # Auto Save
@@ -637,28 +628,46 @@ async def save_new_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[SAVED] {clean_name} -> {file_id}")
     else:
         print(f"[SKIPPED] {clean_name} already exists")
-
+        
 # =====================
 # Fallback: random/unrecognized text handler
 # =====================
 async def handle_random_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    update_activity()
+    # only show warmup if bot is still in cold window
+    time_since_start = (datetime.now(timezone.utc) - STARTUP_TIME).total_seconds()
+    cold_start = not RENDER_WARMED and time_since_start < 90
     stop_event = asyncio.Event()
-
-    # Show short warm-up animation
-    asyncio.create_task(smart_progress(update, stop_event))
-    await asyncio.sleep(0.3)
-    stop_event.set()
+    warm_task = None
+    if cold_start:
+        warm_task = asyncio.create_task(smart_progress(update, stop_event, mode="random"))
 
     msg = await update.message.reply_text(
         "👋 Hey there! I’m your friendly bot.\n"
         "Kindly use secure links from our official channel to access your files.\n"
-         f"👉 <a href='https://t.me/{CHANNEL_USERNAME}'>Join Anime Share Point</a>",
+        f"👉 <a href='https://t.me/{CHANNEL_USERNAME}'>Join Anime Share Point</a>",
         parse_mode="HTML"
     )
     SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+    context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+
+    # stop warmup and mark warmed
+    RENDER_WARMED = True
+    stop_event.set()
+    
+
+# =====================
+# Error handler
+# =====================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logging.exception("Unhandled exception in handler")
+
+
 # =====================
 # Main
 # =====================
+
 async def main():
     app = Application.builder().token(TOKEN).build()
 
@@ -685,21 +694,13 @@ async def main():
 
     # Handle refresh for join channel
     app.add_handler(CallbackQueryHandler(handle_refresh, pattern="^refresh:"))
-
-    # -------------------
-    # post_init block (runs after bot starts)
-    # -------------------
+    
+    # post_init: set commands (run after app.start)
     async def on_startup(app: Application):
-        # [1] Background task for inactivity check
-        asyncio.create_task(check_inactivity(app))
-
-        # [2] Setup command menu
-        #Normal User Commmands 
         user_cmds = [
             BotCommand("start", "Fetch your file"),
             BotCommand("about", "About this bot")
         ]
-        #Admin Commmands 
         admin_cmds = user_cmds + [
             BotCommand("add", "Add file manually"),
             BotCommand("list", "List files"),
@@ -710,31 +711,31 @@ async def main():
             BotCommand("removealias", "Remove alias"),
             BotCommand("debugjson", "List all data and alias"),
         ]
-
-        await app.bot.set_my_commands(user_cmds)
-        await app.bot.set_my_commands(admin_cmds, scope={"type": "chat", "chat_id": ADMIN_ID})
-
-        print("✅ Startup setup complete (menu + background tasks started)")
+        try:
+            await app.bot.set_my_commands(user_cmds)
+            await app.bot.set_my_commands(admin_cmds, scope={"type": "chat", "chat_id": ADMIN_ID})
+        except Exception:
+            logging.exception("Failed to set commands during startup")
+        logging.info("Startup setup complete (menu set)")
 
     app.post_init = on_startup
 
-    # -------------------
-    # aiohttp web server
-    # -------------------
+    # aiohttp web server (webhook)
     web_app = web.Application()
 
-    # ✅ Webhook route for Telegram
     async def handle_webhook(request):
-        data = await request.json()
-        print("📩 Update received:", data)  # Debugging
-        await app.update_queue.put(Update.de_json(data, app.bot))
-        return web.Response(text="OK")
+        try:
+            data = await request.json()
+            logging.debug("Incoming webhook: %s", data)
+            await app.update_queue.put(Update.de_json(data, app.bot))
+            return web.Response(text="OK")
+        except Exception:
+            logging.exception("Failed to handle webhook")
+            return web.Response(status=500, text="ERR")
 
-    # ✅ Root route for browser (health check)
     async def handle_root(request):
         return web.Response(text="Bot is alive 🟢", content_type="text/plain")
 
-    # Register routes
     web_app.add_routes([
         web.post(f"/webhook/{TOKEN}", handle_webhook),
         web.get("/", handle_root)
@@ -744,15 +745,16 @@ async def main():
     # Start Webhook Server
     # -------------------
     async with app:
-        # Set Telegram webhook
+        # Small warm-up delay before webhook
+        await asyncio.sleep(1.5)
         webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{TOKEN}"
         await app.bot.set_webhook(webhook_url)
         print(f"✅ Webhook set successfully at: {webhook_url}")
 
         # Initialize and start Telegram bot
         await app.initialize()
-        asyncio.create_task(app.start())
-        print("🌀 Telegram bot event loop started ")
+        await app.start()
+        print("🌀 Telegram bot started (webhook mode)")
 
         # Start aiohttp web server
         runner = web.AppRunner(web_app)
@@ -762,7 +764,16 @@ async def main():
         await site.start()
 
         print(f"🚀 Bot running via webhook on port {port}")
-        await asyncio.Event().wait()  # keep running
+
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            print("🛑 Shutdown signal received — closing bot gracefully...")
+        finally:
+            await app.stop()
+            await app.shutdown()
+            await app.update_queue.join()
+            print("✅ Bot shutdown complete (graceful exit)")
 
 
 if __name__ == "__main__":
