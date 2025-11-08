@@ -222,6 +222,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         SENT_MESSAGES.append((msg.chat_id, msg.message_id))
         context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+        context.application.create_task(schedule_delete_message(context, update.message.chat_id, update.message.message_id))
 
         # mark warmed and stop the warmup animation
         RENDER_WARMED = True
@@ -399,7 +400,7 @@ async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         logging.exception("Error verifying membership")
         try:
-            msg = await query.edit_message_text("⚠ Couldn’t verify your channel join. Please try again later.")
+            msg = await query.edit_message_text("⚠ Couldn’t verify your Fchannel join. Please try again later.")
             SENT_MESSAGES.append((msg.chat_id, msg.message_id))
             context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))  
         except Exception:
@@ -416,7 +417,7 @@ async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Fake message object to reuse process_alias_or_file
         class FakeMessage:
-            def _init_(self, chat_id):
+            def __init__(self, chat_id):
                 self.chat_id = chat_id
                 self.chat = type("Chat", (), {"id": chat_id})()
 
@@ -476,6 +477,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     SENT_MESSAGES.append((msg.chat_id, msg.message_id))
     context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+    context.application.create_task(schedule_delete_message(context, update.message.chat_id, update.message.message_id))
 
 # =====================
 # Admin Commands
@@ -633,6 +635,7 @@ async def save_new_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Fallback: random/unrecognized text handler
 # =====================
 async def handle_random_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global RENDER_WARMED
     update_activity()
     # only show warmup if bot is still in cold window
     time_since_start = (datetime.now(timezone.utc) - STARTUP_TIME).total_seconds()
@@ -650,6 +653,7 @@ async def handle_random_message(update: Update, context: ContextTypes.DEFAULT_TY
     )
     SENT_MESSAGES.append((msg.chat_id, msg.message_id))
     context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
+    context.application.create_task(schedule_delete_message(context, update.message.chat_id, update.message.message_id))
 
     # stop warmup and mark warmed
     RENDER_WARMED = True
