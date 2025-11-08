@@ -293,7 +293,7 @@ async def process_alias_or_file(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             msg = await update.message.reply_text(
                 f"✅ Sent {sent_count} files for: <b>{alias_name}</b>\n\n"
-                "🕒 Files auto-delete in 20 minutes.",
+                "🕒 Files auto-delete in 10 minutes.",
                 parse_mode="HTML"
             )
             SENT_MESSAGES.append((msg.chat_id, msg.message_id))
@@ -308,12 +308,12 @@ async def process_alias_or_file(update: Update, context: ContextTypes.DEFAULT_TY
         SENT_MESSAGES.append((video_msg.chat_id, video_msg.message_id))
         await msg.delete()
 
-        # Auto delete file after 20 min (optional track)
+        # Auto delete file after 10 min (optional track)
         SENT_MESSAGES.append((video_msg.chat_id, video_msg.message_id))
         # schedule job (do NOT await run_once — it returns a Job object)
         context.application.job_queue.run_once(
             delete_message,
-            when=timedelta(minutes=20),
+            when=timedelta(minutes=10),
             data={"chat_id": video_msg.chat_id, "msg_id": video_msg.message_id}
         )
 
@@ -406,7 +406,7 @@ async def check_inactivity(app: Application):
         now = datetime.now(timezone.utc)
         diff = (now - LAST_ACTIVITY).total_seconds()
 
-        if diff > 1200:  # 20 minutes
+        if diff > 600:  # 10 minutes
             logging.warning("⚠ No activity for 20 minutes. Cleaning up messages & restarting...")
 
             for chat_id, msg_id in SENT_MESSAGES:
@@ -638,7 +638,24 @@ async def save_new_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         print(f"[SKIPPED] {clean_name} already exists")
 
+# =====================
+# Fallback: random/unrecognized text handler
+# =====================
+async def handle_random_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stop_event = asyncio.Event()
 
+    # Show short warm-up animation
+    asyncio.create_task(smart_progress(update, stop_event))
+    await asyncio.sleep(0.3)
+    stop_event.set()
+
+    msg = await update.message.reply_text(
+        "👋 Hey there! I’m your friendly bot.\n"
+        "Kindly use secure links from our official channel to access your files.\n"
+         f"👉 <a href='https://t.me/{CHANNEL_USERNAME}'>Join Anime Share Point</a>",
+        parse_mode="HTML"
+    )
+    SENT_MESSAGES.append((msg.chat_id, msg.message_id))
 # =====================
 # Main
 # =====================
@@ -658,6 +675,10 @@ async def main():
     app.add_handler(CommandHandler("listaliases", list_aliases))
     app.add_handler(CommandHandler("removealias", remove_alias))
     app.add_handler(CommandHandler("debugjson", debug_json))
+   
+
+    # Handle random text messages (non-command)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_random_message))
 
     # Auto-save all incoming messages
     app.add_handler(MessageHandler(filters.ALL, save_new_file))
