@@ -1,5 +1,6 @@
 import json
 import os
+import io
 import re
 import logging
 import aiohttp
@@ -41,6 +42,10 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Example: https://your-render-app.onren
 
 
 GIST_ENABLED = bool(os.getenv("GIST_ID") and os.getenv("GITHUB_TOKEN"))
+
+if not TOKEN or not WEBHOOK_URL:
+    logging.error("❌ Missing BOT_TOKEN or WEBHOOK_URL in environment variables.")
+    sys.exit(1)
 
 DATA_FILE = "files.json"
 ALIAS_FILE = "aliases.json"
@@ -115,92 +120,113 @@ def update_activity():
 # Smart Dummy Progress
 # =====================
 
-async def smart_dummy_progress(update: Update, stop_event: asyncio.Event):
-    """Show dynamic progress messages until real task finishes."""
-    progress_msgs = [
+async def smart_progress(update, stop_event: asyncio.Event, mode: str = "token"):
+    """Show dynamic progress based on mode until Render wakes up."""
+    if mode == "token":
+        msgs = [
         "👋 Hey there! Warming up the system...",
         "⚙ Getting everything ready for you...",
         "📂 Preparing your secure file vault...",
         "🔍 Checking access token validity...",
         "🚀 Almost done, just a few seconds more..."
     ]
-    sent_msgs = []
+    elif mode == "start":
+        msgs = [
+            "🤖 Checking if you're a bot...",
+            "😄 Haha sorry, I’m the bot!",
+            "🔎 Verifying system readiness...",
+            "🚀 Getting things ready for you..."
+        ]
+    else:  # mode == "random"
+        msgs = [
+            "👀 Thanks for your message...",
+            "🗂 Searching command database...",
+            "📡 Looking for valid responses...",
+            "🤔 Hmm... almost there..."
+        ]
 
-    for msg_text in progress_msgs:
+    sent = []
+    for text in msgs:
         if stop_event.is_set():
             break
-        msg = await update.message.reply_text(msg_text)
-        sent_msgs.append(msg)
-        await asyncio.sleep(random.uniform(1.5, 3.5))  # ⏱ random delay
+        m = await update.message.reply_text(text)
+        sent.append(m)
+        await asyncio.sleep(random.uniform(1.5, 3.2))
 
     if not stop_event.is_set():
-        final_msg = await update.message.reply_text("✨ System ready — finishing up...")
-        sent_msgs.append(final_msg)
-        await asyncio.sleep(1.8)
+        final = await update.message.reply_text("✨ System ready — finishing up...")
+        sent.append(final)
+        await asyncio.sleep(1.5)
 
-    # Cleanup all dummy messages
-    for msg in sent_msgs:
+    for m in sent:
         try:
-            await msg.delete()
+            await m.delete()
         except Exception:
             pass
+
+
 
 # =====================
 # Core Commands
 # =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global RENDER_WARMED
-
     update_activity()
     args = context.args
     user_id = update.effective_user.id
+    stop_event = asyncio.Event()
 
+    # Detect cold start
+    time_since_start = (datetime.now(timezone.utc) - STARTUP_TIME).total_seconds()
+    cold_start = not RENDER_WARMED and time_since_start < 90
+
+    # CASE 2: plain /start (no token)
     if not args:
+        if cold_start:
+            asyncio.create_task(smart_progress(update, stop_event, mode="start"))
+
+        await asyncio.sleep(0.3)
+        stop_event.set()
+        RENDER_WARMED = True  # mark warmed up
+
         msg = await update.message.reply_text(
             "🎌 Welcome to Anime File Downloader!\n\n"
-             "Kindly Use secure links from our official channel to access your files.\n"
+            "Kindly use secure links from our official channel to access your files.\n"
             f"👉 <a href='https://t.me/{CHANNEL_USERNAME}'>Join Anime Share Point</a>",
             parse_mode="HTML"
-
         )
         SENT_MESSAGES.append((msg.chat_id, msg.message_id))
         return
 
+    # CASE 1: token provided
     key = " ".join(args).strip()
-
-    # ✅ Step 1: Verify token first (normal users can't use aliases directly)
     if len(key) >= 10 and " " not in key:
         wait_msg = await update.message.reply_text("⏳ Preparing your download session...")
         SENT_MESSAGES.append((wait_msg.chat_id, wait_msg.message_id))
-        
-        # 💤 Adaptive Render cold start handler
-        time_since_start = (datetime.now(timezone.utc) - STARTUP_TIME).total_seconds()
-        cold_start = not RENDER_WARMED and time_since_start < 90  # first 1.5 minutes after startup
-        stop_event = asyncio.Event()
 
-        # Launch dummy progress in background if cold start
         if cold_start:
-            asyncio.create_task(smart_dummy_progress(update, stop_event))
+            asyncio.create_task(smart_progress(update, stop_event, mode="token"))
 
         verify_url = f"https://mkcycles.pythonanywhere.com/tokens/verify?token={key}&user_id={user_id}"
-
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(verify_url, timeout=8) as resp:
                     result = await resp.json()
             except Exception as e:
                 logging.error(f"Token verification failed: {e}")
-                stop_event.set()  # stop dummy messages if error occurs
+                stop_event.set()
                 return await wait_msg.edit_text("⚠ Token verification failed. Try again later.")
 
-        stop_event.set()  # ✅ stop dummy messages once response is ready
-
+        stop_event.set()
         await wait_msg.delete()
+        RENDER_WARMED = True  # ✅ mark system warmed
 
         if not result.get("valid"):
-            msg = await update.message.reply_text("❌ Invalid or expired token.\n"
+            msg = await update.message.reply_text(
+                "❌ Invalid or expired token.\n"
                 "Please use a valid link from our <b>Official Anime Share Point</b> channel.",
-                parse_mode="HTML")
+                parse_mode="HTML"
+            )
             SENT_MESSAGES.append((msg.chat_id, msg.message_id))
             return
 
@@ -212,8 +238,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SENT_MESSAGES.append((msg.chat_id, msg.message_id))
             return
 
-
-        # ✅ Step 2: Ask to join channel before fetching
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNEL_USERNAME}")],
             [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{alias_name}")]
@@ -225,16 +249,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SENT_MESSAGES.append((msg.chat_id, msg.message_id))
         return
 
-    # ✅ Only admin can use alias directly
-    if user_id == ADMIN_ID:
-        await process_alias_or_file(update, context, key)
-    else:
-        msg = await update.message.reply_text(
-            "😅 Oops .\nIt's look like this command is not valid.\n"
-            "Please use the download link from Official Channel to download files....."
-        )
-        SENT_MESSAGES.append((msg.chat_id, msg.message_id))
+    # CASE 3: invalid command
+    if cold_start:
+        asyncio.create_task(smart_progress(update, stop_event, mode="random"))
 
+    await asyncio.sleep(0.3)
+    stop_event.set()
+    RENDER_WARMED = True
+
+    msg = await update.message.reply_text(
+        "😅 Invalid command or request.\n"
+        "Please use the download link from our <b>Official Channel</b> to access files.",
+        parse_mode="HTML"
+    )
+    SENT_MESSAGES.append((msg.chat_id, msg.message_id))
 
 
 # =====================
@@ -282,11 +310,13 @@ async def process_alias_or_file(update: Update, context: ContextTypes.DEFAULT_TY
 
         # Auto delete file after 20 min (optional track)
         SENT_MESSAGES.append((video_msg.chat_id, video_msg.message_id))
-        await context.job_queue.run_once(
+        # schedule job (do NOT await run_once — it returns a Job object)
+        context.application.job_queue.run_once(
             delete_message,
             when=timedelta(minutes=20),
             data={"chat_id": video_msg.chat_id, "msg_id": video_msg.message_id}
         )
+
         msg2 = await update.message.reply_text("✅ File sent successfully.")
         SENT_MESSAGES.append((msg2.chat_id, msg2.message_id))
     else:
@@ -373,7 +403,7 @@ async def check_inactivity(app: Application):
     global SENT_MESSAGES
     while True:
         await asyncio.sleep(300)  # check every 5 minutes
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         diff = (now - LAST_ACTIVITY).total_seconds()
 
         if diff > 1200:  # 20 minutes
@@ -557,38 +587,29 @@ async def remove_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Alias not found.")
 
 async def debug_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current contents of JSON data files (for admin only)."""
+    """Show current contents of JSON data files (for admin only). Sends two files: files.json and aliases.json"""
     if update.effective_user.id != ADMIN_ID:
         return await update.message.reply_text("⛔ Unauthorized.")
 
     data = load_json(DATA_FILE)
     aliases = load_json(ALIAS_FILE)
 
-    text = "<b>🧠 Debug Info:</b>\n\n"
-    text += "<b>Files:</b>\n"
-    if data:
-        for i, (k, v) in enumerate(data.items(), start=1):
-            text += f"{i}. {k} → <code>{v}</code>\n"
-    else:
-        text += "❌ No files found.\n"
+    # Prepare two small files to send back
+    files = {
+        "files.json": json.dumps(data, ensure_ascii=False, indent=2),
+        "aliases.json": json.dumps(aliases, ensure_ascii=False, indent=2),
+    }
 
-    text += "\n<b>Aliases:</b>\n"
-    if aliases:
-        for i, (alias, items) in enumerate(aliases.items(), start=1):
-            try:
-                if isinstance(items, list):
-                    joined = ", ".join(items)
-                elif isinstance(items, str):
-                    joined = items
-                else:
-                    joined = str(items)
-                text += f"{i}. <b>{alias}</b> → {joined}\n"
-            except Exception as e:
-                text += f"{i}. <b>{alias}</b> → ⚠ Error: {e}\n"
-    else:
-        text += "❌ No aliases found.\n"
+    for fname, content in files.items():
+        bio = io.BytesIO(content.encode("utf-8"))
+        bio.name = fname
+        # send as document (so big content is handled) — keep small though
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=bio)
 
-    await update.message.reply_text(text, parse_mode="HTML")
+    await update.message.reply_text("✅ Sent debug JSON files.")
+    
+    
+
 # =====================
 # Auto Save
 # =====================
@@ -643,35 +664,39 @@ async def main():
     # handle refresh for join channel 
     app.add_handler(CallbackQueryHandler(handle_refresh, pattern="^refresh:"))
     
-    # Background task for inactivity check (after app starts)
-    async def start_background_tasks(app: Application):
-        asyncio.create_task(check_inactivity(app))
-    app.post_init = start_background_tasks
+    
+    # Combined post_init block
+    
+        # [1] post_init block  
+        # Background task for inactivity check (after app starts)
+        async def on_startup(app: Application):
+            asyncio.create_task(check_inactivity(app))
 
-    # Setup command menu
-    async def set_menu(app: Application):
-        """Set command menu."""
-        #For Normal User
-        user_cmds = [
-            BotCommand("start", "Fetch your file"),
-            BotCommand("about", "About this bot")
-        ]
-        # For Admin Use Only
-        admin_cmds = user_cmds + [
-            BotCommand("add", "Add file manually"),
-            BotCommand("list", "List files"),
-            BotCommand("remove", "Remove a file"),
-            BotCommand("clearall", "Clear all files"),
-            BotCommand("addalias", "Add alias for grouped files"),
-            BotCommand("listaliases", "List aliases"),
-            BotCommand("removealias", "Remove alias"),
-            BotCommand("debugjson", "List all data and alias"),
-        ]
+        # [2] post_init block 
+        # Setup command menu For Normal User
+            user_cmds = [
+                BotCommand("start", "Fetch your file"),
+                BotCommand("about", "About this bot")
+            ]
+            # For Admin Use Only
+            admin_cmds = user_cmds + [
+                BotCommand("add", "Add file manually"),
+                BotCommand("list", "List files"),
+                BotCommand("remove", "Remove a file"),
+                BotCommand("clearall", "Clear all files"),
+                BotCommand("addalias", "Add alias for grouped files"),
+                BotCommand("listaliases", "List aliases"),
+                BotCommand("removealias", "Remove alias"),
+                BotCommand("debugjson", "List all data and alias"),
+            ]
 
-        await app.bot.set_my_commands(user_cmds)
-        await app.bot.set_my_commands(admin_cmds, scope={"type":"chat", "chat_id":ADMIN_ID})
+            await app.bot.set_my_commands(user_cmds)
+            await app.bot.set_my_commands(admin_cmds, scope={"type":"chat", "chat_id":ADMIN_ID})
+            
+            print("✅ Startup setup complete (menu + background tasks started)")
 
-    app.post_init = set_menu
+        app.post_init = on_startup
+
     
     # -------------------
     # aiohttp web server
@@ -691,7 +716,6 @@ async def main():
         return web.Response(text="Bot is alive 🟢", content_type="text/plain")
 
 
-
     # Register routes
     web_app.add_routes([
         web.post(f"/webhook/{TOKEN}", handle_webhook),
@@ -709,9 +733,10 @@ async def main():
         await app.bot.set_webhook(webhook_url)
         print(f"✅ Webhook set successfully at: {webhook_url}")
 
-        # Start processing updates in background
-        asyncio.create_task(app.start())
-        print("🌀 Bot event loop started")
+        # Initialize and start Telegram bot
+        await app.initialize()
+        await app.start()
+        print("🌀 Telegram bot started (webhook mode)")
 
         # Start aiohttp web server
         runner = web.AppRunner(web_app)
