@@ -57,11 +57,6 @@ ALIAS_FILE = "aliases.json"
 LAST_ACTIVITY = datetime.now(timezone.utc)
 SENT_MESSAGES = []  # Track all messages for cleanup
 
-# dummy messages and render warmup activity
-STARTUP_TIME = datetime.now(timezone.utc)
-RENDER_WARMED = False  # 🔥 Flag to avoid dummy progress once warmed
-
-
 
 
 # =====================
@@ -131,89 +126,16 @@ async def schedule_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: i
 
 
 # =====================
-# Smart Dummy Progress
-# =====================
-
-async def smart_progress(update, stop_event: asyncio.Event, mode: str = "token"):
-    """Show dynamic progress based on mode until Render wakes up."""
-    if mode == "token":
-        msgs = [
-        "👋 Hey there! Warming up the system...",
-        "⚙ Getting everything ready for you...",
-        "📂 Preparing your secure file vault...",
-        "🔍 Checking access token validity...",
-        "🚀 Almost done, just a few seconds more..."
-    ]
-    elif mode == "start":
-        msgs = [
-            "🤖 Checking if you're a bot...",
-            "😄 Haha sorry, I’m the bot!",
-            "🔎 Verifying system readiness...",
-            "🚀 Getting things ready for you..."
-        ]
-    else:  # mode == "random"
-        msgs = [
-            "👀 Thanks for your message...",
-            "🗂 Searching command database...",
-            "📡 Looking for valid responses...",
-            "🤔 Hmm... almost there..."
-        ]
-
-    sent = []
-    try:
-        for text in msgs:
-            if stop_event.is_set():
-                break
-            # reply_text may fail if update.message is missing; guard it
-            try:
-                m = await update.message.reply_text(text)
-                sent.append(m)
-            except Exception:
-                logging.exception("Failed to send warmup message (maybe update.message is None)")
-                break
-            await asyncio.sleep(random.uniform(1.5, 3.2))
-
-        # If not signalled to stop, show a final "ready" line
-        if not stop_event.is_set():
-            try:
-                final = await update.message.reply_text("✨ System ready — finishing up...")
-                sent.append(final)
-                await asyncio.sleep(1.5)
-            except Exception:
-                logging.exception("Failed to send warmup final message")
-
-    finally:
-        # Attempt to clean up the progress messages (best-effort)
-        for m in sent:
-            try:
-                await m.delete()
-            except Exception:
-                pass
-
-
-
-# =====================
 # Core Commands
 # =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global RENDER_WARMED
+
     update_activity()
     args = context.args
     user_id = update.effective_user.id
-    stop_event = asyncio.Event()
-
-    # Detect cold start
-    time_since_start = (datetime.now(timezone.utc) - STARTUP_TIME).total_seconds()
-    cold_start = not RENDER_WARMED and time_since_start < 90
 
     # CASE 1: plain /start (no token)
     if not args:
-        # launch warmup animation if cold
-        warm_task = None
-        if cold_start:
-            warm_task = asyncio.create_task(smart_progress(update, stop_event, mode="start"))
-
-        # send the real welcome message
         msg = await update.message.reply_text(
             "🎌 Welcome to Anime File Downloader!\n\n"
             "Kindly use secure links from our official channel to access your files.\n"
@@ -224,9 +146,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
         context.application.create_task(schedule_delete_message(context, update.message.chat_id, update.message.message_id))
 
-        # mark warmed and stop the warmup animation
-        RENDER_WARMED = True
-        stop_event.set()
         return
 
 
@@ -236,10 +155,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wait_msg = await update.message.reply_text("⏳ Preparing your download session...")
         SENT_MESSAGES.append((wait_msg.chat_id, wait_msg.message_id))
 
-        warm_task = None
-        if cold_start:
-            warm_task = asyncio.create_task(smart_progress(update, stop_event, mode="token"))
-
         verify_url = f"https://mkcycles.pythonanywhere.com/tokens/verify?token={key}&user_id={user_id}"
         async with aiohttp.ClientSession() as session:
             try:
@@ -247,17 +162,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     result = await resp.json()
             except Exception:
                 logging.exception("Token verification failed")
-                stop_event.set()
                 return await wait_msg.edit_text("⚠ Token verification failed. Try again later.")
 
-        # Stop warmup and remove waiting message
-        stop_event.set()
         try:
             await wait_msg.delete()
         except Exception:
             pass
-
-        RENDER_WARMED = True  # mark warmed
 
         if not result.get("valid"):
             msg = await update.message.reply_text(
@@ -294,9 +204,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     # CASE 3: invalid command (text after /start doesn't look like a token)
-    warm_task = None
-    if cold_start:
-        warm_task = asyncio.create_task(smart_progress(update, stop_event, mode="random"))
 
     msg = await update.message.reply_text(
         "😅 Invalid command or request.\n"
@@ -306,8 +213,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SENT_MESSAGES.append((msg.chat_id, msg.message_id))
     context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
 
-    RENDER_WARMED = True
-    stop_event.set()
 
 
 # =====================
@@ -532,6 +437,7 @@ async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================
 # Alias System (Improved)
 # =====================
+
 async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
@@ -554,24 +460,55 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show only the alias names."""
     if not await admin_only(update, context):
         return await update.message.reply_text("⛔ Unauthorized.")
+    
     aliases = load_json(ALIAS_FILE) or {}
     if not aliases:
         return await update.message.reply_text("📂 No aliases saved.")
+    
     text = "<b>🔗 Saved Aliases:</b>\n\n"
-    for i, (alias, items) in enumerate(aliases.items(), start=1):
-        if isinstance(items, str):
-            items = [items]
-        elif not isinstance(items, list):
-            try:
-                items = list(items)
-            except Exception:
-                items = [str(items)]
+    for i, alias in enumerate(aliases.keys(), start=1):
         safe_alias = alias.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        safe_items = [str(it).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") for it in items]
-        text += f"{i}. <b>{safe_alias}</b> → {', '.join(safe_items)}\n"
+        text += f"{i}. {safe_alias}\n"
+    
     await update.message.reply_text(text, parse_mode="HTML")
+
+
+
+async def get_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetch and show details of a specific alias."""
+    if not await admin_only(update, context):
+        return await update.message.reply_text("⛔ Unauthorized.")
+    
+    if not context.args:
+        return await update.message.reply_text("Usage: /getalias <alias name>")
+    
+    alias_name = " ".join(context.args).strip()
+    aliases = load_json(ALIAS_FILE) or {}
+    
+    if alias_name not in aliases:
+        return await update.message.reply_text("❌ Alias not found.")
+    
+    items = aliases[alias_name]
+    if isinstance(items, str):
+        items = [items]
+    elif not isinstance(items, list):
+        try:
+            items = list(items)
+        except Exception:
+            items = [str(items)]
+    
+    safe_alias = alias_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    safe_items = [str(it).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") for it in items]
+    
+    text = f"<b>Alias name:</b> {safe_alias}\n\n"
+    for i, item in enumerate(safe_items, start=1):
+        text += f"{i}. {item}\n"
+    
+    await update.message.reply_text(text, parse_mode="HTML")
+
 
 async def remove_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
@@ -587,20 +524,6 @@ async def remove_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Alias not found.")
 
-async def debug_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return await update.message.reply_text("⛔ Unauthorized.")
-    data = load_json(DATA_FILE) or {}
-    aliases = load_json(ALIAS_FILE) or {}
-    files = {
-        "files.json": json.dumps(data, ensure_ascii=False, indent=2),
-        "aliases.json": json.dumps(aliases, ensure_ascii=False, indent=2),
-    }
-    for fname, content in files.items():
-        bio = io.BytesIO(content.encode("utf-8"))
-        bio.name = fname
-        await context.bot.send_document(chat_id=update.effective_chat.id, document=bio)
-    await update.message.reply_text("✅ Sent debug JSON files.")
  
 
 # =====================
@@ -635,15 +558,8 @@ async def save_new_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Fallback: random/unrecognized text handler
 # =====================
 async def handle_random_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global RENDER_WARMED
+
     update_activity()
-    # only show warmup if bot is still in cold window
-    time_since_start = (datetime.now(timezone.utc) - STARTUP_TIME).total_seconds()
-    cold_start = not RENDER_WARMED and time_since_start < 90
-    stop_event = asyncio.Event()
-    warm_task = None
-    if cold_start:
-        warm_task = asyncio.create_task(smart_progress(update, stop_event, mode="random"))
 
     msg = await update.message.reply_text(
         "👋 Hey there! I’m your friendly bot.\n"
@@ -655,9 +571,6 @@ async def handle_random_message(update: Update, context: ContextTypes.DEFAULT_TY
     context.application.create_task(schedule_delete_message(context, msg.chat_id, msg.message_id))
     context.application.create_task(schedule_delete_message(context, update.message.chat_id, update.message.message_id))
 
-    # stop warmup and mark warmed
-    RENDER_WARMED = True
-    stop_event.set()
     
 
 # =====================
@@ -687,7 +600,7 @@ async def main():
     app.add_handler(CommandHandler("addalias", add_alias))
     app.add_handler(CommandHandler("listaliases", list_aliases))
     app.add_handler(CommandHandler("removealias", remove_alias))
-    app.add_handler(CommandHandler("debugjson", debug_json))
+    app.add_handler(CommandHandler("getalias", get_alias))
    
 
     # Handle random text messages (non-command)
@@ -707,13 +620,13 @@ async def main():
         ]
         admin_cmds = user_cmds + [
             BotCommand("add", "Add file manually"),
-            BotCommand("list", "List files"),
+            BotCommand("list", "List saved files"),
             BotCommand("remove", "Remove a file"),
-            BotCommand("clearall", "Clear all files"),
             BotCommand("addalias", "Add alias for grouped files"),
             BotCommand("listaliases", "List aliases"),
+            BotCommand("getalias", "View details of an alias"),
             BotCommand("removealias", "Remove alias"),
-            BotCommand("debugjson", "List all data and alias"),
+            BotCommand("clearall", "☠ Clear Database ☠, Don't Use"),
         ]
         try:
             await app.bot.set_my_commands(user_cmds)
