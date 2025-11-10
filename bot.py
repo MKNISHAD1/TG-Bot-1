@@ -8,7 +8,7 @@ import sys
 import random
 from datetime import timedelta, datetime, timezone
 from dotenv import load_dotenv
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -111,8 +111,8 @@ def update_activity():
     global LAST_ACTIVITY
     LAST_ACTIVITY = datetime.now(timezone.utc)
 
-async def schedule_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_id: int, delay: int = 600):
-    """Schedules deletion of a message after given seconds (default 10 minutes)."""
+async def schedule_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_id: int, delay: int = 1800):
+    """Schedules deletion of a message after given seconds (default 30 minutes)."""
     try:
         await asyncio.sleep(delay)
         await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -247,7 +247,7 @@ async def process_alias_or_file(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             msg = await update.message.reply_text(
                 f"✅ Sent {sent_count} files for: <b>{alias_name}</b>\n\n"
-                "🕒 Files auto-delete in 10 minutes.",
+                "🕒 Files auto-delete in 30 minutes.",
                 parse_mode="HTML"
             )
             SENT_MESSAGES.append((msg.chat_id, msg.message_id))
@@ -273,7 +273,7 @@ async def process_alias_or_file(update: Update, context: ContextTypes.DEFAULT_TY
         # schedule delete after 10 minutes
         context.application.job_queue.run_once(
             delete_message,
-            when=timedelta(minutes=10),
+            when=timedelta(minutes=30),
             data={"chat_id": video_msg.chat_id, "msg_id": video_msg.message_id}
         )
 
@@ -376,7 +376,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "This bot helps you securely fetch anime files using special access links.\n\n"
         "🎥 Files are hosted in our private vault.\n"
         f"📢 Join our public channel:<a href='https://t.me/{CHANNEL_USERNAME}'><b>Anime Share Point</b></a>\n"
-        "🕒 Files auto-delete after 10 minutes for safety.\n\n"
+        "🕒 Files auto-delete after 30 minutes for safety.\n\n"
         "Created with ❤ by MK",
         parse_mode="HTML"
     )
@@ -630,7 +630,8 @@ async def main():
         ]
         try:
             await app.bot.set_my_commands(user_cmds)
-            await app.bot.set_my_commands(admin_cmds, scope={"type": "chat", "chat_id": ADMIN_ID})
+            await app.bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+
         except Exception:
             logging.exception("Failed to set commands during startup")
         logging.info("Startup setup complete (menu set)")
